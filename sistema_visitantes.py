@@ -1,51 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-============================================================================
- SISTEMA DE CONTROLE DE VISITANTES
- ---------------------------------------------------------------------------
- Aplicação desktop (Tkinter + SQLite) para registro e consulta de
- visitantes, com autenticação, autorização por perfil (RBAC) e trilha de
- auditoria em arquivo local.
+Projeto Prático - Sistema de Controle de Visitantes
+Desenvolvido para a disciplina de Segurança da Informação.
 
- Requisitos de segurança implementados
- -----------------------------------------------------------------------
-  * Autenticação obrigatória: a aplicação abre na tela de login e nenhuma
-    outra tela é criada sem uma sessão válida.
-  * Senhas nunca são gravadas nem comparadas em texto puro. São usadas
-    hashlib.pbkdf2_hmac (SHA-256) com "salt" aleatório por usuário e
-    comparação em tempo constante (hmac.compare_digest). O esquema
-    completo (algoritmo, iterações, salt e hash) fica gravado na própria
-    coluna `usuarios.password_hash`, preservando o esquema solicitado.
-  * Autorização em duas camadas: a interface esconde os botões
-    administrativos do perfil operador E o backend revalida o perfil em
-    cada função sensível (exigir_admin), exibindo "Acesso Negado".
-  * Validação de todos os formulários com mensagens via messagebox.
-  * Auditoria em security.log no formato:
-        [Data/Hora] [Usuário] [Ação] detalhe
-
- Como executar
- -----------------------------------------------------------------------
-     python sistema_visitantes.py
-
- Credenciais criadas automaticamente no primeiro uso:
-     usuário: admin      senha: admin123
-     -> Troque essa senha (cadastre um novo administrador e deixe o padrão
-        desativado) antes de usar em produção.
-
- Modularização (opcional)
- -----------------------------------------------------------------------
-     O arquivo é único e funcional, mas está dividido em blocos
-     delimitados. Para modularizar, mova cada bloco assim:
-        Bloco 1 + 2 + 3  ->  config.py / seguranca.py / database.py
-        Bloco 4          ->  servicos.py      (regras de negócio)
-        Bloco 5          ->  ui.py            (interface Tkinter)
-        Bloco 6          ->  main.py          (ponto de entrada)
-============================================================================
+Aplicação desktop em Python utilizando Tkinter e SQLite.
+Implementa autenticação, autorização por perfil (RBAC),
+armazenamento seguro de senhas (PBKDF2-SHA256) e auditoria de ações.
 """
-
-# ===========================================================================
-# BLOCO 1 — IMPORTAÇÕES, CONSTANTES E CONFIGURAÇÃO
-# ===========================================================================
 
 import hashlib
 import hmac
@@ -59,33 +20,32 @@ from contextlib import contextmanager
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-# Diretório do próprio arquivo: garante que banco e log fiquem sempre juntos
-# da aplicação, independentemente de onde ela for executada.
+# Caminhos dos arquivos locais
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "visitantes.db")
 LOG_PATH = os.path.join(BASE_DIR, "security.log")
 
-# Perfis (RBAC)
+# Perfis de acesso (RBAC)
 ROLE_ADMIN = "admin"
 ROLE_OPERADOR = "operador"
 ROLES_VALIDAS = (ROLE_ADMIN, ROLE_OPERADOR)
 ROLE_ROTULOS = {ROLE_ADMIN: "Administrador", ROLE_OPERADOR: "Operador"}
 
-# Usuário administrador padrão, criado apenas se a tabela estiver vazia.
+# Credenciais iniciais
 ADMIN_PADRAO_USUARIO = "admin"
 ADMIN_PADRAO_SENHA = "admin123"
 
-# Parâmetros do algoritmo de hash de senha.
+# Parâmetros de hash de senha
 PBKDF2_ALGORITMO = "pbkdf2_sha256"
 PBKDF2_ITERACOES = 260_000
 SALT_BYTES = 16
 
-# Regras de validação
+# Limites de entrada
 TAMANHO_MIN_SENHA = 6
 TAMANHO_MAX_LOGIN = 40
 TAMANHO_MAX_TEXTO = 120
 
-# Ações registradas na auditoria (usadas como rótulo no security.log).
+# Tipos de eventos para auditoria
 ACAO_LOGIN_OK = "LOGIN_OK"
 ACAO_LOGIN_FALHA = "LOGIN_FALHA"
 ACAO_ACESSO_NEGADO = "ACESSO_NEGADO"
@@ -97,27 +57,18 @@ ACAO_ERRO_INTERNO = "ERRO_INTERNO"
 
 FORMATO_DATA_HORA = "%Y-%m-%d %H:%M:%S"
 
-# Regex usada para ler/interpretar cada linha do security.log.
 PADRAO_LINHA_LOG = re.compile(
     r"^\[(?P<quando>[^\]]*)\]\s*\[(?P<usuario>[^\]]*)\]\s*"
     r"\[(?P<acao>[^\]]*)\]\s*(?P<detalhe>.*)$"
 )
 
 
-# ===========================================================================
-# BLOCO 2 — SEGURANÇA: HASH DE SENHAS E AUDITORIA
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# SEGURANÇA E AUDITORIA
+# ---------------------------------------------------------------------------
 
 def gerar_hash_senha(senha, salt=None):
-    """
-    Gera o hash de uma senha no formato:
-
-        pbkdf2_sha256$<iterações>$<salt em hex>$<hash em hex>
-
-    O salt é único por usuário, o que impede tabelas pré-computadas
-    (rainbow tables) e faz com que duas senhas iguais gerem hashes
-    diferentes. `salt` só é informado em testes.
-    """
+    """Gera o hash PBKDF2-SHA256 com salt para armazenamento no banco."""
     if not isinstance(senha, str) or not senha:
         raise ValueError("A senha deve ser um texto não vazio.")
 
@@ -135,10 +86,7 @@ def gerar_hash_senha(senha, salt=None):
 
 
 def verificar_senha(senha, senha_armazenada):
-    """
-    Compara a senha informada com o hash guardado no banco.
-    Retorna True/False e nunca levanta exceção para dados corrompidos.
-    """
+    """Valida a senha fornecida comparando com o hash salvo no banco."""
     if not senha or not senha_armazenada:
         return False
 
@@ -151,7 +99,6 @@ def verificar_senha(senha, senha_armazenada):
             return False
         salt = bytes.fromhex(salt_hex)
     except (ValueError, AttributeError, TypeError):
-        # Registro inválido no banco: trata como credencial inválida.
         return False
 
     try:
@@ -161,16 +108,11 @@ def verificar_senha(senha, senha_armazenada):
     except (ValueError, TypeError):
         return False
 
-    # Comparação em tempo constante: evita descobrir a senha medindo o tempo
-    # de resposta da comparação.
     return hmac.compare_digest(calculado.hex(), hash_hex)
 
 
 def _sanitizar_campo_log(valor):
-    """
-    Impede injeção de linhas falsas no arquivo de log: remove quebras de
-    linha e colchetes do conteúdo controlado pelo usuário.
-    """
+    """Remove caracteres especiais que possam alterar o formato do arquivo de log."""
     texto = "-" if valor is None else str(valor)
     texto = texto.replace("\r", " ").replace("\n", " ")
     texto = texto.replace("[", "(").replace("]", ")")
@@ -178,13 +120,7 @@ def _sanitizar_campo_log(valor):
 
 
 def registrar_log(usuario, acao, detalhe=""):
-    """
-    Grava uma linha de auditoria em security.log no formato
-    [Data/Hora] [Usuário] [Ação] detalhe.
-
-    A gravação nunca interrompe o fluxo do sistema: se o arquivo não puder
-    ser escrito, o erro é reportado no console e a operação continua.
-    """
+    """Escreve um registro no arquivo security.log."""
     quando = datetime.now().strftime(FORMATO_DATA_HORA)
     linha = "[{}] [{}] [{}] {}".format(
         quando,
@@ -203,11 +139,7 @@ def registrar_log(usuario, acao, detalhe=""):
 
 
 def ler_logs(limite=2000):
-    """
-    Lê o security.log e devolve uma lista de dicionários com as chaves
-    quando/usuario/acao/detalhe (as últimas `limite` linhas, da mais
-    recente para a mais antiga).
-    """
+    """Lê e retorna os últimos registros salvos em security.log."""
     if not os.path.exists(LOG_PATH):
         return []
 
@@ -226,25 +158,21 @@ def ler_logs(limite=2000):
         if casamento:
             registros.append(casamento.groupdict())
         else:
-            # Linha fora do padrão: exibida mesmo assim, sem ser descartada.
             registros.append(
                 {"quando": "-", "usuario": "-", "acao": "DESCONHECIDO", "detalhe": linha}
             )
 
-    registros.reverse()  # mais recentes primeiro
+    registros.reverse()
     return registros
 
 
-# ===========================================================================
-# BLOCO 3 — PERSISTÊNCIA (SQLite)
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# PERSISTÊNCIA (SQLITE)
+# ---------------------------------------------------------------------------
 
 @contextmanager
 def conexao_db():
-    """
-    Context manager de conexão: garante commit em caso de sucesso, rollback
-    em caso de erro e o fechamento da conexão em qualquer cenário.
-    """
+    """Gerenciador de contexto da conexão SQLite com commit/rollback automático."""
     conexao = sqlite3.connect(DB_PATH)
     conexao.row_factory = sqlite3.Row
     try:
@@ -258,14 +186,7 @@ def conexao_db():
 
 
 def setup_database():
-    """
-    Cria as tabelas `usuarios` e `visitantes` se não existirem e insere o
-    administrador padrão quando a tabela de usuários está vazia, para
-    permitir o primeiro acesso ao sistema.
-
-    Também aplica migrações incrementais em bancos já existentes (por
-    exemplo, a coluna `visitantes.registrado_por`), preservando os dados.
-    """
+    """Inicializa as tabelas no SQLite e insere o usuário admin inicial."""
     coluna_adicionada = None
     with conexao_db() as conexao:
         conexao.execute(
@@ -290,8 +211,6 @@ def setup_database():
             """
         )
 
-        # Migração para bancos criados pela versão anterior: adiciona a
-        # coluna que identifica quem registrou cada visitante.
         colunas_visitantes = {
             linha["name"]
             for linha in conexao.execute("PRAGMA table_info(visitantes)").fetchall()
@@ -334,19 +253,16 @@ def setup_database():
     return criou_padrao
 
 
-# ===========================================================================
-# BLOCO 4 — REGRAS DE NEGÓCIO E AUTORIZAÇÃO
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# REGRAS DE NEGÓCIO E CONTROLE DE ACESSO
+# ---------------------------------------------------------------------------
 
 class AcessoNegado(Exception):
-    """Levantada quando o perfil do usuário não permite a operação."""
+    """Exceção para permissão de acesso negada."""
 
 
 def exigir_admin(usuario_sessao, operacao):
-    """
-    Verificação de autorização no backend (não confia na interface).
-    Registra a tentativa indevida no log e levanta AcessoNegado.
-    """
+    """Valida se o usuário autenticado possui perfil de Administrador."""
     if usuario_sessao and usuario_sessao.get("role") == ROLE_ADMIN:
         return True
 
@@ -365,7 +281,7 @@ def exigir_admin(usuario_sessao, operacao):
 
 
 def exigir_sessao(usuario_sessao, operacao):
-    """Garante que existe uma sessão autenticada antes de prosseguir."""
+    """Valida se existe um usuário autenticado."""
     if not usuario_sessao:
         registrar_log("sem-sessao", ACAO_ACESSO_NEGADO,
                       "operação '{}' sem autenticação".format(operacao))
@@ -373,8 +289,7 @@ def exigir_sessao(usuario_sessao, operacao):
 
 
 def validar_texto_obrigatorio(valor, nome_campo, tamanho_max=TAMANHO_MAX_TEXTO):
-    """Valida campos de texto: obrigatório, dentro do limite e sem caracteres
-    de controle usados para forjar linhas de log."""
+    """Valida se o texto preenchido é válido e não excede os limites."""
     texto = "" if valor is None else str(valor).strip()
     if not texto:
         raise ValueError("Preencha todos os campos. O campo \"{}\" está vazio.".format(nome_campo))
@@ -407,10 +322,7 @@ def validar_senha(senha, confirmacao=None):
 
 
 def autenticar(username, senha):
-    """
-    Valida credenciais contra o banco.
-    Retorna um dicionário com a sessão (id, username, role) ou None.
-    """
+    """Valida o login e a senha do usuário."""
     username = (username or "").strip()
     if not username or not senha:
         raise ValueError("Preencha todos os campos.")
@@ -434,16 +346,12 @@ def autenticar(username, senha):
 
 
 def encerrar_sessao(usuario_sessao):
-    """Registra o logout na auditoria."""
     if usuario_sessao:
         registrar_log(usuario_sessao["username"], ACAO_LOGOUT, "sessão finalizada")
 
 
 def cadastrar_usuario(usuario_sessao, username, senha, confirmacao, role):
-    """
-    Cadastra um novo usuário (exclusivo do perfil admin).
-    Levanta AcessoNegado (perfil), ValueError (validação) ou RuntimeError (banco).
-    """
+    """Cadastra um novo usuário no banco (apenas Admin)."""
     exigir_admin(usuario_sessao, "cadastro de usuários")
 
     username = validar_login(username)
@@ -472,10 +380,7 @@ def cadastrar_usuario(usuario_sessao, username, senha, confirmacao, role):
 
 
 def cadastrar_visitante(usuario_sessao, nome, documento):
-    """
-    Cadastra um visitante. Permitido a admin e operador, mas somente com
-    sessão autenticada.
-    """
+    """Cadastra um visitante associado ao usuário logado."""
     exigir_sessao(usuario_sessao, "cadastro de visitantes")
 
     nome = validar_texto_obrigatorio(nome, "Nome")
@@ -504,10 +409,7 @@ def cadastrar_visitante(usuario_sessao, nome, documento):
 
 
 def listar_visitantes(usuario_sessao):
-    """
-    Retorna a lista de visitantes (mais recentes primeiro), incluindo o
-    login do usuário que fez cada registro.
-    """
+    """Retorna os visitantes ordenados do mais recente para o mais antigo."""
     exigir_sessao(usuario_sessao, "consulta de visitantes")
 
     try:
@@ -523,53 +425,37 @@ def listar_visitantes(usuario_sessao):
 
 
 def obter_logs(usuario_sessao, limite=2000):
-    """Retorna os registros de auditoria (exclusivo do perfil admin)."""
     exigir_admin(usuario_sessao, "visualização dos logs de segurança")
     return ler_logs(limite=limite)
 
 
-# ===========================================================================
-# BLOCO 5 — TEMA E INTERFACE GRÁFICA (Tkinter / ttk)
 # ---------------------------------------------------------------------------
-# Refatoração VISUAL: paleta, estilos ttk, layout e widgets.
-#
-# Nada de regra de negócio foi tocado aqui. As funções do Bloco 4 continuam
-# sendo chamadas exatamente como antes, com os mesmos argumentos, e o mesmo
-# tratamento de exceções (ValueError / AcessoNegado / RuntimeError) segue
-# valendo em cada manipulação de evento.
-# ===========================================================================
+# INTERFACE GRÁFICA (TKINTER / TTK)
+# ---------------------------------------------------------------------------
 
-# ---- 5.1 Paleta de cores --------------------------------------------------
-# Tons escolhidos para leitura confortável e contraste adequado (WCAG AA)
-# entre texto e fundo. Os azuis/verdes usados em botões são um tom mais
-# escuro que os sugeridos (#0284C7 / #059669) porque, com texto branco, os
-# originais ficavam em ~4,1:1 e ~3,8:1 — abaixo do mínimo de 4,5:1.
-COR_FUNDO          = "#F1F5F9"   # fundo neutro da aplicação
-COR_CARTAO         = "#FFFFFF"   # fundo dos cards e tabelas
-COR_BARRA          = "#0F172A"   # azul-marinho da barra superior
-COR_BARRA_ALT      = "#1E293B"   # variação da barra (botões/realce)
+COR_FUNDO          = "#F1F5F9"
+COR_CARTAO         = "#FFFFFF"
+COR_BARRA          = "#0F172A"
+COR_BARRA_ALT      = "#1E293B"
 COR_BARRA_HOVER    = "#334155"
-COR_PRIMARIA       = "#0369A1"   # azul: ação principal
+COR_PRIMARIA       = "#0369A1"
 COR_PRIMARIA_HOVER = "#0284C7"
-COR_SUCESSO        = "#047857"   # verde: ação principal de destaque
+COR_SUCESSO        = "#047857"
 COR_SUCESSO_HOVER  = "#059669"
-COR_NEUTRA         = "#E2E8F0"   # botões secundários / cancelar
+COR_NEUTRA         = "#E2E8F0"
 COR_NEUTRA_HOVER   = "#CBD5E1"
-COR_TEXTO          = "#0F172A"   # texto principal
-COR_TEXTO_SUAVE    = "#64748B"   # texto de apoio
-COR_TEXTO_INVERSO  = "#FFFFFF"   # texto sobre fundo escuro
-COR_BORDA          = "#CBD5E1"   # bordas de campos e cards
-COR_ZEBRA          = "#F8FAFC"   # linha alternada das tabelas
-COR_SELECAO        = "#DBEAFE"   # linha selecionada nas tabelas
-COR_DESABILITADO   = "#94A3B8"   # botão desabilitado
-COR_ALERTA_FUNDO   = "#FEF3C7"   # aviso de área restrita
+COR_TEXTO          = "#0F172A"
+COR_TEXTO_SUAVE    = "#64748B"
+COR_TEXTO_INVERSO  = "#FFFFFF"
+COR_BORDA          = "#CBD5E1"
+COR_ZEBRA          = "#F8FAFC"
+COR_SELECAO        = "#DBEAFE"
+COR_DESABILITADO   = "#94A3B8"
+COR_ALERTA_FUNDO   = "#FEF3C7"
 COR_ALERTA_TEXTO   = "#92400E"
 
-FONTE = "Segoe UI"               # fonte nativa, sem dependência externa
+FONTE = "Segoe UI"
 
-# ---- 5.2 Estilos ttk -------------------------------------------------------
-
-# (nome, fundo, hover, pressionado, padding, fonte)
 _ESTILOS_BOTAO = (
     ("Primario.TButton", COR_PRIMARIA, COR_PRIMARIA_HOVER, COR_BARRA,
      (16, 10), (FONTE, 10, "bold")),
@@ -587,32 +473,25 @@ _ESTILOS_BOTAO = (
 
 
 def configurar_tema(raiz):
-    """
-    Aplica o tema 'clam' e registra todos os estilos usados pela interface.
-    Recebe a janela raiz (necessária para o option database do Combobox).
-    """
+    """Aplica o tema visual nos componentes do Tkinter."""
     estilo = ttk.Style(raiz)
     try:
         estilo.theme_use("clam")
     except tk.TclError:
-        pass  # Tema indisponível: segue com o padrão da plataforma.
+        pass
 
-    # A lista suspensa do Combobox é um widget Tk clássico, fora do ttk:
-    # por isso é estilizada pelo banco de opções.
     raiz.option_add("*TCombobox*Listbox.background", COR_CARTAO)
     raiz.option_add("*TCombobox*Listbox.foreground", COR_TEXTO)
     raiz.option_add("*TCombobox*Listbox.selectBackground", COR_SELECAO)
     raiz.option_add("*TCombobox*Listbox.selectForeground", COR_TEXTO)
     raiz.option_add("*TCombobox*Listbox.font", (FONTE, 10))
 
-    # ---- Base ----------------------------------------------------------
     estilo.configure(".", background=COR_FUNDO, foreground=COR_TEXTO,
                      font=(FONTE, 10))
     estilo.configure("TFrame", background=COR_FUNDO)
     estilo.configure("TLabel", background=COR_FUNDO, foreground=COR_TEXTO,
                      font=(FONTE, 10))
 
-    # ---- Estrutura de cards (fundo branco) -----------------------------
     estilo.configure("Cartao.TFrame", background=COR_CARTAO)
     estilo.configure("Cartao.TLabel", background=COR_CARTAO,
                      foreground=COR_TEXTO, font=(FONTE, 10))
@@ -631,7 +510,6 @@ def configurar_tema(raiz):
     estilo.configure("Cartao.TLabelframe.Label", background=COR_CARTAO,
                      foreground=COR_TEXTO, font=(FONTE, 11, "bold"))
 
-    # ---- Barra superior (fundo escuro) ---------------------------------
     estilo.configure("BarraTitulo.TLabel", background=COR_BARRA,
                      foreground=COR_TEXTO_INVERSO, font=(FONTE, 13, "bold"))
     estilo.configure("BarraSub.TLabel", background=COR_BARRA,
@@ -643,7 +521,6 @@ def configurar_tema(raiz):
                      foreground="#F1F5F9", font=(FONTE, 9, "bold"),
                      padding=(12, 5))
 
-    # ---- Botões ---------------------------------------------------------
     for nome, fundo, hover, pressionado, espacamento, fonte in _ESTILOS_BOTAO:
         estilo.configure(nome, background=fundo, foreground=COR_TEXTO_INVERSO,
                          font=fonte, borderwidth=0, relief="flat",
@@ -664,7 +541,6 @@ def configurar_tema(raiz):
                foreground=[("disabled", COR_DESABILITADO)])
     estilo.configure("Barra.TButton", foreground=COR_TEXTO_INVERSO)
 
-    # ---- Campos de entrada ----------------------------------------------
     estilo.configure("Campo.TEntry", fieldbackground=COR_CARTAO,
                      background=COR_CARTAO, foreground=COR_TEXTO,
                      bordercolor=COR_BORDA, lightcolor=COR_BORDA,
@@ -687,7 +563,6 @@ def configurar_tema(raiz):
                lightcolor=[("focus", COR_PRIMARIA_HOVER)],
                darkcolor=[("focus", COR_PRIMARIA_HOVER)])
 
-    # ---- Tabelas ---------------------------------------------------------
     estilo.configure("Treeview", background=COR_CARTAO,
                      fieldbackground=COR_CARTAO, foreground=COR_TEXTO,
                      bordercolor=COR_BORDA, lightcolor=COR_CARTAO,
@@ -703,7 +578,6 @@ def configurar_tema(raiz):
                background=[("active", COR_BARRA_HOVER)],
                foreground=[("active", COR_TEXTO_INVERSO)])
 
-    # ---- Barras de rolagem e separadores --------------------------------
     estilo.configure("Vertical.TScrollbar", background=COR_NEUTRA,
                      troughcolor=COR_FUNDO, bordercolor=COR_FUNDO,
                      arrowcolor=COR_TEXTO_SUAVE, borderwidth=0, relief="flat")
@@ -712,14 +586,8 @@ def configurar_tema(raiz):
     estilo.configure("TSeparator", background=COR_BORDA)
 
 
-# ---- 5.3 Componentes reutilizáveis ----------------------------------------
-
 def criar_treeview(pai, colunas):
-    """
-    Cria um Treeview com barra de rolagem dentro de um container branco.
-    `colunas` é uma lista de tuplas (chave, título, largura, alinhamento).
-    Retorna (container, treeview).
-    """
+    """Cria um componente Treeview com barra de rolagem."""
     container = ttk.Frame(pai, style="Cartao.TFrame")
     container.rowconfigure(0, weight=1)
     container.columnconfigure(0, weight=1)
@@ -735,7 +603,6 @@ def criar_treeview(pai, colunas):
         tree.column(chave, width=largura, anchor=alinhamento,
                     stretch=(chave == colunas[-1][0]))
 
-    # Zebrado suave: linhas pares com fundo levemente azulado.
     tree.tag_configure("par", background=COR_ZEBRA)
 
     barra = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
@@ -747,10 +614,7 @@ def criar_treeview(pai, colunas):
 
 
 class DialogoBase(tk.Toplevel):
-    """
-    Janela modal padrão: faixa superior escura com título e um corpo branco
-    (self.corpo) onde cada diálogo constrói o próprio conteúdo.
-    """
+    """Classe base para janelas modais da aplicação."""
 
     def __init__(self, master, titulo, subtitulo=""):
         super().__init__(master)
@@ -780,7 +644,6 @@ class DialogoBase(tk.Toplevel):
         self.destroy()
 
     def exibir(self):
-        """Centraliza em relação à janela principal e abre de forma modal."""
         self.update_idletasks()
         principal = self.master.winfo_toplevel()
         largura = self.winfo_width()
@@ -795,10 +658,8 @@ class DialogoBase(tk.Toplevel):
         self.focus_set()
 
 
-# ---- 5.4 Telas -------------------------------------------------------------
-
 class TelaLogin(ttk.Frame):
-    """Tela inicial: única porta de entrada do sistema."""
+    """Tela de login inicial da aplicação."""
 
     def __init__(self, master, app):
         super().__init__(master, padding=24)
@@ -811,7 +672,6 @@ class TelaLogin(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        # Card centralizado sobre o fundo neutro da aplicação.
         cartao = tk.Frame(self, bg=COR_CARTAO, highlightthickness=1,
                           highlightbackground=COR_BORDA,
                           highlightcolor=COR_BORDA)
@@ -834,7 +694,6 @@ class TelaLogin(ttk.Frame):
         corpo.pack(fill="both", expand=True)
         corpo.columnconfigure(0, weight=1)
 
-        # Rótulo acima do campo, alinhado à esquerda e com respiro entre eles.
         ttk.Label(corpo, text="Usuário", style="RotuloCartao.TLabel").grid(
             row=0, column=0, sticky="w"
         )
@@ -865,7 +724,6 @@ class TelaLogin(ttk.Frame):
             style="RodapeCartao.TLabel",
         ).grid(row=6, column=0, pady=(20, 0))
 
-        # Enter em qualquer campo dispara o login.
         self.entry_usuario.bind("<Return>", self._entrar)
         self.entry_senha.bind("<Return>", self._entrar)
         self.after(50, self.entry_usuario.focus_set)
@@ -874,7 +732,6 @@ class TelaLogin(ttk.Frame):
         usuario = self.var_usuario.get().strip()
         senha = self.var_senha.get()
 
-        # Validação básica na interface (o backend valida novamente).
         if not usuario or not senha:
             messagebox.showwarning(
                 "Campos obrigatórios", "Preencha todos os campos.", parent=self
@@ -907,14 +764,13 @@ class TelaLogin(ttk.Frame):
 
 
 class TelaPrincipal(ttk.Frame):
-    """Painel de portaria. Os botões administrativos só existem para o admin."""
+    """Painel principal de controle da portaria."""
 
     def __init__(self, master, app):
         super().__init__(master, padding=0)
         self.app = app
         self.usuario = app.usuario_logado
         if not self.usuario:
-            # Salvaguarda: nunca monta a tela sem sessão autenticada.
             raise AcessoNegado("Acesso Negado: é necessário estar autenticado.")
         self._construir()
 
@@ -940,7 +796,6 @@ class TelaPrincipal(ttk.Frame):
             self._card_operador(conteudo)
 
     def _construir_barra_superior(self):
-        """Barra de status fixa: título do sistema, badge do usuário e logout."""
         barra = tk.Frame(self, bg=COR_BARRA)
         barra.grid(row=0, column=0, sticky="we")
         barra.columnconfigure(0, weight=1)
@@ -961,7 +816,6 @@ class TelaPrincipal(ttk.Frame):
         direita = tk.Frame(barra, bg=COR_BARRA)
         direita.grid(row=0, column=1, sticky="e", padx=20)
 
-        # Badge do perfil: cor e rótulo mudam conforme o papel do usuário.
         admin = self._eh_admin()
         estilo_badge = "BadgeAdmin.TLabel" if admin else "BadgeOperador.TLabel"
         rotulo = ROLE_ROTULOS.get(self.usuario["role"], self.usuario["role"]).upper()
@@ -1052,21 +906,13 @@ class TelaPrincipal(ttk.Frame):
             style="Cartao.TLabel", justify="left", wraplength=620,
         ).grid(row=1, column=0, sticky="w")
 
-    # ---- Autorização na camada de interface -----------------------------
-
     def _confirmar_admin(self, operacao):
-        """
-        Aciona a verificação do backend e avisa o usuário quando negada.
-        O log da tentativa é feito dentro de exigir_admin.
-        """
         try:
             exigir_admin(self.usuario, operacao)
             return True
         except AcessoNegado as erro:
             messagebox.showerror("Acesso Negado", str(erro), parent=self)
             return False
-
-    # ---- Ações ----------------------------------------------------------
 
     def _abrir_cadastro_visitante(self):
         try:
@@ -1102,7 +948,7 @@ class TelaPrincipal(ttk.Frame):
 
 
 class DialogoCadastroVisitante(DialogoBase):
-    """Formulário de cadastro de visitante (admin e operador)."""
+    """Janela modal para cadastro de visitantes."""
 
     def __init__(self, master, app, usuario):
         super().__init__(master, "Cadastrar Visitante",
@@ -1174,7 +1020,7 @@ class DialogoCadastroVisitante(DialogoBase):
 
 
 class DialogoCadastroUsuario(DialogoBase):
-    """Formulário de cadastro de usuários (exclusivo do admin)."""
+    """Janela modal para cadastro de usuários (Admin)."""
 
     def __init__(self, master, app, usuario):
         super().__init__(master, "Cadastrar Novo Usuário",
@@ -1243,7 +1089,6 @@ class DialogoCadastroUsuario(DialogoBase):
         self.after(50, entradas[0].focus_set)
 
     def _salvar(self, evento=None):
-        # Traduz o rótulo exibido no Combobox para o valor armazenado no banco.
         rotulo = self.var_perfil.get()
         perfil = next(
             (chave for chave, valor in ROLE_ROTULOS.items() if valor == rotulo), None
@@ -1278,7 +1123,7 @@ class DialogoCadastroUsuario(DialogoBase):
 
 
 class DialogoListaVisitantes(DialogoBase):
-    """Lista de visitantes em Treeview."""
+    """Janela modal para exibição dos visitantes cadastrados."""
 
     def __init__(self, master, app, usuario):
         super().__init__(master, "Visitantes Cadastrados",
@@ -1338,7 +1183,6 @@ class DialogoListaVisitantes(DialogoBase):
                     visitante["nome"],
                     visitante["documento"],
                     visitante["data_registro"],
-                    # Registros anteriores à migração não têm autor gravado.
                     visitante.get("registrado_por") or "- não informado -",
                 ),
                 tags=("par",) if indice % 2 else (),
@@ -1351,7 +1195,7 @@ class DialogoListaVisitantes(DialogoBase):
 
 
 class DialogoLogs(DialogoBase):
-    """Visualização do arquivo security.log (exclusivo do admin)."""
+    """Janela modal para exibição da trilha de auditoria (Admin)."""
 
     def __init__(self, master, app, usuario):
         super().__init__(master, "Logs de Segurança",
@@ -1424,7 +1268,7 @@ class DialogoLogs(DialogoBase):
 
 
 class AplicacaoVisitantes(tk.Tk):
-    """Janela principal e controlador de navegação entre as telas."""
+    """Classe principal da aplicação."""
 
     def __init__(self):
         super().__init__()
@@ -1441,32 +1285,24 @@ class AplicacaoVisitantes(tk.Tk):
         self.container = ttk.Frame(self)
         self.container.pack(fill="both", expand=True)
 
-        # Qualquer exceção não tratada em callback do Tk é registrada no log
-        # e apresentada ao usuário, evitando que o programa feche sozinho.
         self.report_callback_exception = self._tratar_excecao_tk
 
         self.mostrar_login()
 
-    # ---- Navegação ------------------------------------------------------
-
     def _trocar_tela(self, classe_tela):
-        """Destrói a tela atual e monta a próxima dentro do container."""
         if self.tela_atual is not None:
             self.tela_atual.destroy()
             self.tela_atual = None
 
-        # Remove qualquer widget remanescente (telas antigas ou janelas
-        # modais que ainda estivessem abertas).
         for filho in self.container.winfo_children():
             filho.destroy()
 
         try:
             self.tela_atual = classe_tela(self.container, self)
         except AcessoNegado as erro:
-            # Ex.: TelaPrincipal montada sem sessão válida.
             self.usuario_logado = None
             for filho in self.container.winfo_children():
-                filho.destroy()  # descarta o frame parcialmente construído
+                filho.destroy()
             self.tela_atual = TelaLogin(self.container, self)
             messagebox.showerror("Acesso Negado", str(erro), parent=self.tela_atual)
         self.tela_atual.pack(fill="both", expand=True)
@@ -1477,27 +1313,21 @@ class AplicacaoVisitantes(tk.Tk):
 
     def mostrar_tela_principal(self):
         if not self.usuario_logado:
-            # Nenhuma tela protegida é aberta sem autenticação.
             self.mostrar_login()
             return
         self._trocar_tela(TelaPrincipal)
 
     def iniciar_sessao(self, sessao):
-        """Chamado pela tela de login após autenticação bem-sucedida."""
         self.usuario_logado = dict(sessao)
-        # after_idle evita destruir a tela de login dentro do próprio evento.
         self.after_idle(self.mostrar_tela_principal)
 
     def encerrar_sessao(self):
-        """Logout: registra a ação e volta para a tela de login."""
         encerrar_sessao(self.usuario_logado)
         self.after_idle(self.mostrar_login)
 
     def encerrar_aplicacao(self):
         encerrar_sessao(self.usuario_logado)
         self.destroy()
-
-    # ---- Tratamento global de erros -------------------------------------
 
     def _tratar_excecao_tk(self, tipo, valor, traceback_obj):
         detalhe = "".join(traceback.format_exception(tipo, valor, traceback_obj))
@@ -1517,16 +1347,14 @@ class AplicacaoVisitantes(tk.Tk):
             pass
 
 
-# ===========================================================================
-# BLOCO 6 — PONTO DE ENTRADA
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# PONTO DE ENTRADA DA APLICAÇÃO
+# ---------------------------------------------------------------------------
 
 def main():
-    # 1) Banco de dados antes de qualquer tela.
     try:
         setup_database()
     except (sqlite3.Error, OSError, ValueError) as erro:
-        # messagebox precisa de uma janela raiz: cria uma invisível para o aviso.
         raiz = tk.Tk()
         raiz.withdraw()
         messagebox.showerror(
@@ -1537,7 +1365,6 @@ def main():
         raiz.destroy()
         return 1
 
-    # 2) Aplicação: abre sempre na tela de login.
     try:
         app = AplicacaoVisitantes()
     except tk.TclError as erro:
